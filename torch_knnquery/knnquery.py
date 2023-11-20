@@ -289,8 +289,8 @@ class VoxelGrid(torch.nn.Module):
         k: int, 
         radius_limit_scale: float,
         max_shading_points_per_ray: Optional[int] = 24,
-        main_sample_points,
-        main_sample_mask
+        main_sample_points: torch.Tensor,
+        main_sample_mask: torch.Tensor
         ): 
         r""" Find the k-nearest neighbors of ray samples from each point cloud
         Args:
