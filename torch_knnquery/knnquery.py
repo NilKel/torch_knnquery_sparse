@@ -393,7 +393,7 @@ class VoxelGrid(torch.nn.Module):
             ray_mask_2 = torch.sum(sample_pidx_tensor.view(R_valid, -1) >= 0, dim=-1) > 0
             R_valid = ray_mask_2.sum().item()
             ray_mask_2 = ray_mask_2.bool()
-            main_sample_points = main_sample_points[ray_mask_2, :, :]    
+            
             sample_pidx_tensor = sample_pidx_tensor[ray_mask_2, :, :]
 
 
