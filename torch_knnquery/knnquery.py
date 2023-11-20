@@ -282,5 +282,125 @@ class VoxelGrid(torch.nn.Module):
         ray_mask_1 = ray_mask_1.view(self.B, R)
 
         # self.count+=1
-        return sample_pidx_tensor, sample_loc_tensor, ray_mask_1.to(torch.int8)
+        return sample_pidx_tensor, sample_loc_tensor, ray_mask_1.to(torch.int8), sample_loc_mask_tensor
 
+    def query_sparse(self, 
+        raypos: torch.Tensor,
+        k: int, 
+        radius_limit_scale: float,
+        max_shading_points_per_ray: Optional[int] = 24,
+        main_sample_points,
+        main_sample_mask
+        ): 
+        r""" Find the k-nearest neighbors of ray samples from each point cloud
+        Args:
+            raypos (torch.Tensor): Tensor of size [num_rays, num_samples_per_ray, 3] containing query positions.
+            k (int): number of nearest neighbors to sample.
+            radius_limit_scale (float): radius limit in which to search for nearest neighbors.
+            max_shading_points_per_ray (int, optional): The maximum number of points per ray for which neighbors are sampled.
+                The first max_shading_points_per_ray samples of each ray that hit occupied voxels return neighbors.
+        """
+        device = raypos.device
+        R, D = raypos.size(1), raypos.size(2)
+        assert k <= 20, "k cannot be greater than 20"
+
+        sample_mask_tensor = torch.zeros([self.B, R, D], dtype=torch.int32, device=device)
+        #raypos = raypos.to(torch.float32)
+        # Check which sample positions actually hit occupied voxels.
+        # Output: 
+        # # sample_mask_tensor contains binary indicators for each sample position
+
+        self.create_raypos_mask(
+            raypos,  # [1, 2048, 400, 3]
+            self.coor_occ_tensor,  # [1, 2048, 400, 3]
+            self.B,
+            R,
+            D,
+            self.grid_size_vol,
+            self.d_coord_shift,
+            self.scaled_vdim,
+            self.scaled_vsize,
+            sample_mask_tensor
+        )
+
+        
+        # Flatten batch + ray dimensions here
+        # Keep track of ray to batch assignment in ray_to_batch_indices
+        sample_mask_tensor = sample_mask_tensor.view(self.B*R, D)
+        ray_to_batch_indices = torch.arange(self.B, dtype=torch.int32, device=device).view(-1,1).expand(-1, R).clone().view(-1)
+        raypos = raypos.view(self.B*R, D, 3)
+
+        ray_mask_1 = torch.max(sample_mask_tensor, dim=-1)[0] > 0 # B* R
+
+        R_valid = torch.sum(ray_mask_1.to(torch.int32)).item()
+        
+        sample_loc_tensor = torch.zeros([R_valid, max_shading_points_per_ray, 3], dtype=raypos.dtype, device=device)
+        sample_pidx_tensor = torch.full([R_valid, max_shading_points_per_ray, k], -1, dtype=torch.int32, device=device)
+
+        if R_valid > 0:
+            ray_to_batch_indices = ray_to_batch_indices[ray_mask_1]
+            sample_mask_tensor = sample_mask_tensor[ray_mask_1, :]
+            raypos = raypos[ray_mask_1, :, :]
+            
+            # For each ray query that hits occupied voxels, 
+            # determine the maximally max_shading_points_per_ray many shading points
+            # Output: 
+            # sample_loc_tensor contains the actual ray queries for which neighbors should be found
+            # sample_loc_mask_tensor contains 1 if the same index in sample_loc_tensor contains a valid sample point
+            sample_loc_mask_tensor = torch.zeros([R_valid, max_shading_points_per_ray], dtype=torch.int32, device=device)
+            raypos_maskcum = torch.cumsum(sample_mask_tensor, dim=-1).to(torch.int32)
+            sample_mask_tensor =  sample_mask_tensor * raypos_maskcum * (raypos_maskcum <= max_shading_points_per_ray) - 1
+            
+            self.get_shadingloc(
+                raypos,  # [1, 2048, 400, 3]
+                sample_mask_tensor,
+                R_valid,
+                D,
+                max_shading_points_per_ray,
+                sample_loc_tensor,
+                sample_loc_mask_tensor
+            )
+
+            # Performs the actual knn queries for all points in sample_loc_tensor
+            # Output: 
+            # sample_pidx_tensor: for each entry in sample_loc_tensor, contains the indices of found neighbors
+
+            radius_limit = radius_limit_scale * max(self.vsize_tup[0], self.vsize_tup[1])
+
+            self.query_along_ray(
+                self.points,
+                ray_to_batch_indices,
+                R_valid,
+                max_shading_points_per_ray,
+                self.max_o,
+                self.P,
+                k,
+                self.grid_size_vol,
+                radius_limit ** 2,
+                self.d_coord_shift,
+                self.scaled_vdim,
+                self.scaled_vsize,
+                self.kernel_size,
+                self.occ_numpnts_tensor,
+                self.occ_2_pnts_tensor,
+                self.coor_2_occ_tensor,
+                main_sample_points,
+                main_sample_mask,
+                sample_pidx_tensor
+                )
+
+            # Filter rays again, based on radius
+            ray_mask_2 = torch.sum(sample_pidx_tensor.view(R_valid, -1) >= 0, dim=-1) > 0
+            R_valid = ray_mask_2.sum().item()
+            ray_mask_2 = ray_mask_2.bool()
+            main_sample_points = main_sample_points[ray_mask_2, :, :]    
+            sample_pidx_tensor = sample_pidx_tensor[ray_mask_2, :, :]
+
+
+            # compute full ray mask
+            ray_mask_1[ray_mask_1.clone()] = ray_mask_2.clone()
+        
+        ray_mask_1 = ray_mask_1.view(self.B, R)
+
+        # self.count+=1
+        return sample_pidx_tensor, main_sample_points, ray_mask_1.to(torch.int8)
