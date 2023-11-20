@@ -288,7 +288,7 @@ class VoxelGrid(torch.nn.Module):
         raypos: torch.Tensor,
         k: int, 
         radius_limit_scale: float,
-        max_shading_points_per_ray: Optional[int] = 24,
+        max_shading_points_per_ray: Optional[int],
         main_sample_points: torch.Tensor,
         main_sample_mask: torch.Tensor
         ): 
